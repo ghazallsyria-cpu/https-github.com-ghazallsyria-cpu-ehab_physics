@@ -7,7 +7,7 @@ import { Video, Calendar, User as UserIcon, BookOpen, RefreshCw, AlertCircle, Pl
 const ZoomMeeting = lazy(() => import('./ZoomMeeting'));
 const YouTubePlayer = lazy(() => import('./YouTubePlayer'));
 
-// Helper to extract video ID from various YouTube URL formats
+// Helper to extract video ID
 const extractYoutubeId = (url: string): string | null => {
     if (!url) return null;
     const regExp = /^.*(?:(?:youtu\.be\/|v\/|vi\/|u\/\w\/|embed\/|shorts\/)|(?:(?:watch)?\?v(?:i)?=|\&v(?:i)?=))([^#\&\?]{11}).*/;
@@ -30,29 +30,28 @@ const LiveSessions: React.FC<LiveSessionsProps> = ({ user }) => {
 
   useEffect(() => {
     setIsLoading(true);
-    // DEBUG: Console log to verify fetching
-    console.log("Subscribing to Live Sessions...");
     
-    const unsubscribeSessions = dbService.subscribeToLiveSessions((updatedSessions) => {
-        console.log("Raw Sessions Fetched:", updatedSessions); // Debug log
-        
-        // Client-side sorting (Safe & Reliable)
-        const sortedSessions = updatedSessions.sort((a,b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
+    // Subscribe to sessions
+    const unsubscribeSessions = dbService.subscribeToLiveSessions((allSessions) => {
+        // Safe Sorting: Handle invalid dates (text inputs) by pushing them to the end
+        const sortedSessions = allSessions.sort((a, b) => {
+            const timeA = new Date(a.startTime).getTime();
+            const timeB = new Date(b.startTime).getTime();
+            const valA = isNaN(timeA) ? 9999999999999 : timeA;
+            const valB = isNaN(timeB) ? 9999999999999 : timeB;
+            return valA - valB;
+        });
         setSessions(sortedSessions);
-        
-        if (teachers.length > 0) setIsLoading(false);
-        setError(null);
+        setIsLoading(false);
     });
     
+    // Subscribe to teachers for extra info (optional)
     const unsubscribeTeachers = dbService.subscribeToUsers((updatedTeachers) => {
         setTeachers(updatedTeachers);
-        if (sessions.length > 0) setIsLoading(false);
     }, 'teacher');
 
-    // Force stop loading if it takes too long (e.g. empty collection)
-    const safetyTimeout = setTimeout(() => {
-        setIsLoading(false);
-    }, 3000);
+    // Safety timeout
+    const safetyTimeout = setTimeout(() => setIsLoading(false), 5000);
 
     return () => {
         unsubscribeSessions();
@@ -61,68 +60,62 @@ const LiveSessions: React.FC<LiveSessionsProps> = ({ user }) => {
     };
   }, []);
   
-  // New Effect for notification logic
+  // Notification Logic
   useEffect(() => {
     const NOTIFICATION_WINDOW_MINUTES = 5;
-
     const checkUpcomingSessions = () => {
         const now = new Date().getTime();
         sessions.forEach(session => {
             if (session.status === 'upcoming') {
                 const sessionTime = new Date(session.startTime).getTime();
-                if (isNaN(sessionTime)) return; // Invalid date, skip
+                if (isNaN(sessionTime)) return;
                 
                 const diffInMinutes = (sessionTime - now) / 60000;
                 const notifiedKey = `notified_${session.id}`;
-                const alreadyNotified = sessionStorage.getItem(notifiedKey);
-
-                if (diffInMinutes > 0 && diffInMinutes <= NOTIFICATION_WINDOW_MINUTES && !alreadyNotified) {
-                    const roundedMinutes = Math.ceil(diffInMinutes);
-                    const toastMessage = `"${session.title}" ستبدأ خلال ${roundedMinutes} ${roundedMinutes > 1 ? 'دقائق' : 'دقيقة'}.`;
-                    
-                    // Show immediate toast
-                    setToast({ title: '📢 جلسة على وشك البدء!', message: toastMessage });
-                    setTimeout(() => setToast(null), 7000);
-
-                    // Create persistent notification in DB
-                    dbService.createNotification({
-                        userId: user.uid,
-                        title: "📢 جلسة على وشك البدء!",
-                        message: `حصتك المباشرة "${session.title}" ستبدأ قريباً. استعد!`,
-                        timestamp: new Date().toISOString(),
-                        isRead: false,
-                        type: 'info',
-                        category: 'academic'
-                    });
-
-                    // Mark as notified for this browser session
+                
+                if (diffInMinutes > 0 && diffInMinutes <= NOTIFICATION_WINDOW_MINUTES && !sessionStorage.getItem(notifiedKey)) {
+                    setToast({ title: '📢 جلسة على وشك البدء!', message: `"${session.title}" تبدأ خلال دقائق.` });
                     sessionStorage.setItem(notifiedKey, 'true');
+                    setTimeout(() => setToast(null), 7000);
                 }
             }
         });
     };
-
-    // Run the check every 30 seconds
     const intervalId = setInterval(checkUpcomingSessions, 30000);
-    checkUpcomingSessions(); // Initial check
-
     return () => clearInterval(intervalId);
-  }, [sessions, user.uid]);
+  }, [sessions]);
+
+  // Robust Filtering Logic
+  const filteredSessions = sessions.filter(session => {
+    // 1. Grade Filtering
+    // If targetGrades is missing or empty, assume it's for everyone.
+    const targets = session.targetGrades || [];
+    const isForEveryone = targets.length === 0;
+    
+    // Normalize user grade to string to avoid number/string mismatch
+    const userGrade = String(user.grade);
+    const isGradeMatch = isForEveryone || targets.some(t => String(t) === userGrade);
+
+    // 2. Subscription Filtering
+    const isPremiumSession = session.isPremium === true;
+    const hasAccess = !isPremiumSession || user.subscription === 'premium' || user.role === 'admin' || user.role === 'teacher';
+
+    return isGradeMatch && hasAccess;
+  });
 
   const handleJoinClick = (session: LiveSession) => {
     if (session.status !== 'live') {
-      alert('لم تبدأ هذه الجلسة بعد. سيتم تفعيل زر الانضمام عند بدء البث.');
+      alert('لم تبدأ هذه الجلسة بعد.');
       return;
     }
-
-    if (session.platform === 'zoom' && session.meetingId) {
+    if (session.platform === 'zoom') {
       setActiveZoomSession(session);
     } else if (session.platform === 'youtube' && session.streamUrl) {
       setActiveYoutubeSession(session);
     } else if (session.streamUrl) {
       window.open(session.streamUrl, '_blank', 'noopener,noreferrer');
     } else {
-      alert('رابط البث غير متوفر حالياً.');
+      alert('رابط البث غير متوفر.');
     }
   };
 
@@ -141,9 +134,7 @@ const LiveSessions: React.FC<LiveSessionsProps> = ({ user }) => {
                             <YouTubePlayer videoId={videoId} />
                         </Suspense>
                     ) : (
-                        <div className="w-full h-full flex items-center justify-center text-red-400 font-bold p-8 text-center">
-                           رابط يوتيوب غير صالح أو لا يمكن تضمينه. يرجى التحقق من الرابط في لوحة التحكم.
-                        </div>
+                        <div className="w-full h-full flex items-center justify-center text-red-400 font-bold p-8 text-center">رابط يوتيوب غير صالح</div>
                     )}
                 </div>
             </div>
@@ -153,12 +144,7 @@ const LiveSessions: React.FC<LiveSessionsProps> = ({ user }) => {
 
   if (activeZoomSession) {
     return (
-      <Suspense fallback={
-        <div className="fixed inset-0 bg-black flex flex-col items-center justify-center text-white z-[500]">
-           <RefreshCw className="animate-spin mb-4" size={40} />
-           <p className="font-bold">جاري تحميل نظام الاجتماعات...</p>
-        </div>
-      }>
+      <Suspense fallback={<div className="fixed inset-0 bg-black flex items-center justify-center text-white z-[500]"><RefreshCw className="animate-spin mb-4" /></div>}>
         <ZoomMeeting 
             meetingNumber={activeZoomSession.meetingId || ""} 
             passCode={activeZoomSession.passcode || ""} 
@@ -170,86 +156,13 @@ const LiveSessions: React.FC<LiveSessionsProps> = ({ user }) => {
       </Suspense>
     );
   }
-  
-  const isUserPremium = user.subscription !== 'free';
-  
-  // Safe filtering logic
-  const filteredSessions = sessions.filter(session => {
-    // If targetGrades is null/undefined or empty, it means "All Grades"
-    const isTargetingAll = !session.targetGrades || session.targetGrades.length === 0;
-    
-    // Check if user's grade is included (handling potential type mismatches string/number)
-    const isGradeMatch = isTargetingAll || (user.grade && session.targetGrades?.some(g => String(g) === String(user.grade)));
-    
-    // Check subscription status
-    const subMatch = !session.isPremium || isUserPremium;
-    
-    return isGradeMatch && subMatch;
-  });
-
-
-  const getPlatformIcon = (platform: LiveSession['platform']) => {
-    switch (platform) {
-      case 'youtube': return <Youtube size={20} />;
-      default: return <Video size={20} />;
-    }
-  };
-  
-  const getJoinButton = (session: LiveSession) => {
-    if (session.status !== 'live') {
-      return (
-        <button disabled className="w-full py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest bg-white/5 text-gray-600 cursor-default">
-          بانتظار بدء المعلم
-        </button>
-      );
-    }
-
-    if (session.platform === 'zoom') {
-      return (
-        <div className="flex flex-col gap-2">
-          <button 
-              onClick={() => handleJoinClick(session)}
-              className="w-full py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest bg-blue-500 text-white shadow-lg hover:scale-[1.02] transition-all flex items-center justify-center gap-3"
-          >
-              <PlayCircle size={16}/> دخول الحصة المدمجة
-          </button>
-          {session.streamUrl && (
-              <button 
-                  onClick={() => window.open(session.streamUrl, '_blank', 'noopener,noreferrer')}
-                  className="w-full py-3 rounded-xl text-[9px] font-black uppercase tracking-widest text-blue-400 border border-blue-500/20 hover:bg-blue-500/10 transition-all flex items-center justify-center gap-2"
-              >
-                  <ExternalLink size={12}/> فتح في تطبيق Zoom
-              </button>
-          )}
-        </div>
-      );
-    }
-    
-    if (session.platform === 'youtube') {
-       return (
-        <button onClick={() => handleJoinClick(session)} className="w-full py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest bg-red-600 text-white shadow-lg hover:scale-[1.02] transition-all flex items-center justify-center gap-3">
-          <Youtube size={16}/> مشاهدة البث الآن
-        </button>
-       );
-    }
-
-    return (
-      <button onClick={() => handleJoinClick(session)} className="w-full py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest bg-gray-500 text-white shadow-lg hover:scale-[1.02] transition-all flex items-center justify-center gap-3">
-        <ExternalLink size={16}/> الانضمام للجلسة
-      </button>
-    );
-  };
-
 
   return (
     <div className="max-w-6xl mx-auto py-12 px-6 animate-fadeIn font-['Tajawal'] text-white">
-      {/* Toast Notification */}
       {toast && (
         <div className="fixed top-24 right-10 z-[2000] w-full max-w-sm animate-slideUp">
             <div className="glass-panel p-6 rounded-[30px] border-2 border-amber-500/30 bg-amber-500/10 flex items-start gap-4 shadow-2xl">
-                <div className="w-12 h-12 rounded-2xl bg-amber-500/20 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0">
-                    <BellRing size={24} className="animate-pulse" />
-                </div>
+                <BellRing size={24} className="text-amber-400 animate-pulse" />
                 <div>
                     <h4 className="font-black text-amber-400">{toast.title}</h4>
                     <p className="text-sm text-gray-300">{toast.message}</p>
@@ -258,77 +171,65 @@ const LiveSessions: React.FC<LiveSessionsProps> = ({ user }) => {
             </div>
         </div>
       )}
+
       <div className="mb-16 text-center">
         <h2 className="text-5xl font-black mb-4 tracking-tighter italic uppercase">الجلسات <span className="text-blue-400 text-glow">المباشرة</span></h2>
         <p className="text-gray-500 text-xl max-w-3xl mx-auto leading-relaxed">
-          انضم إلى فصولنا التفاعلية المباشرة المدمجة مع نخبة من المعلمين في الكويت.
+          جدول حصص البث المباشر والمراجعات لصف <span className="text-white font-bold">{user.grade}</span>.
         </p>
       </div>
 
       <div className="border-t border-white/5 pt-12">
-        <div className="flex justify-between items-center mb-8">
-            <h3 className="text-2xl font-black border-r-4 border-blue-400 pr-4">حصص اليوم</h3>
-            <div className="flex items-center gap-2 text-[10px] font-black text-gray-500 uppercase tracking-widest bg-white/5 px-4 py-2 rounded-xl">
-                <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                مزامنة حية نشطة
-            </div>
-        </div>
-        
         {isLoading ? (
           <div className="py-32 text-center">
              <RefreshCw className="w-12 h-12 text-blue-500 animate-spin mx-auto mb-4" />
-             <p className="text-gray-500 font-bold uppercase tracking-widest text-xs">جاري البحث عن البثوث المجدولة...</p>
+             <p className="text-gray-500 font-bold uppercase tracking-widest text-xs">جاري تحديث الجدول...</p>
           </div>
-        ) : error ? (
-            <div className="py-20 text-center glass-panel rounded-[40px] border-red-500/20 bg-red-500/5">
-                <AlertCircle size={48} className="mx-auto mb-4 text-red-500" />
-                <p className="text-lg font-bold text-red-400">{error}</p>
-            </div>
         ) : filteredSessions.length > 0 ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
               {filteredSessions.map(session => {
                 const teacher = teachers.find(t => t.name === session.teacherName);
-                const isTeacherOnline = teacher?.lastSeen && (new Date().getTime() - new Date(teacher.lastSeen).getTime()) < 3 * 60 * 1000;
+                const isOnline = teacher?.lastSeen && (new Date().getTime() - new Date(teacher.lastSeen).getTime()) < 3 * 60 * 1000;
+                
                 return (
-                  <div 
-                      key={session.id} 
-                      className={`bg-[#0a1118]/80 border p-8 rounded-[40px] group transition-all flex flex-col relative overflow-hidden ${session.status === 'live' ? 'border-blue-500/40 shadow-[0_0_30px_rgba(59,130,246,0.1)]' : 'border-white/5 hover:border-white/10'}`}
-                  >
+                  <div key={session.id} className={`bg-[#0a1118]/80 border p-8 rounded-[40px] group transition-all flex flex-col relative overflow-hidden ${session.status === 'live' ? 'border-blue-500/40 shadow-[0_0_30px_rgba(59,130,246,0.1)]' : 'border-white/5 hover:border-white/10'}`}>
                       <div className="flex justify-between items-start mb-6">
                           <span className={`px-4 py-1.5 rounded-full text-[9px] font-black uppercase tracking-widest ${session.status === 'live' ? 'bg-red-500 text-white animate-pulse' : 'bg-white/10 text-gray-400'}`}>
                               {session.status === 'live' ? 'بث مباشر 🔴' : 'مجدولة 📅'}
                           </span>
-                          <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${session.status === 'live' ? 'bg-blue-500 text-black' : 'bg-white/5 text-gray-500'}`}>
-                              {getPlatformIcon(session.platform)}
+                          <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-white/5 text-gray-500">
+                              {session.platform === 'youtube' ? <Youtube size={20}/> : <Video size={20}/>}
                           </div>
                       </div>
+                      
                       <div className="flex-1">
                           <h4 className="text-xl font-bold text-white mb-2 group-hover:text-blue-400 transition-colors">{session.title}</h4>
                           <div className="text-xs text-gray-500 font-bold mb-6 flex items-center gap-2">
-                            <UserIcon size={14}/> 
-                            {session.teacherName}
-                            {isTeacherOnline !== undefined && (
-                              <span className={`w-2 h-2 rounded-full ml-1 ${isTeacherOnline ? 'bg-green-500' : 'bg-gray-600'}`} title={isTeacherOnline ? 'المعلم متصل الآن' : 'المعلم غير متصل'}></span>
+                            <UserIcon size={14}/> {session.teacherName}
+                            {isOnline && <span className="w-2 h-2 rounded-full bg-green-500" title="المعلم متصل"></span>}
+                          </div>
+                          <div className="space-y-2 mb-6">
+                              <div className="flex items-center gap-2 text-[10px] text-gray-400"><BookOpen size={12}/> {session.topic}</div>
+                              <div className="flex items-center gap-2 text-[10px] text-gray-400"><Calendar size={12}/> {session.startTime}</div>
+                          </div>
+                      </div>
+
+                      {session.status === 'live' ? (
+                          <div className="flex flex-col gap-2">
+                            {session.platform === 'zoom' ? (
+                                <button onClick={() => setActiveZoomSession(session)} className="w-full py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest bg-blue-500 text-white shadow-lg hover:scale-[1.02] transition-all flex items-center justify-center gap-3">
+                                    <PlayCircle size={16}/> دخول الحصة الآن
+                                </button>
+                            ) : (
+                                <button onClick={() => handleJoinClick(session)} className="w-full py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest bg-red-600 text-white shadow-lg hover:scale-[1.02] transition-all flex items-center justify-center gap-3">
+                                    <Youtube size={16}/> مشاهدة البث
+                                </button>
                             )}
                           </div>
-                          
-                          <div className="space-y-2 mb-6">
-                              <div className="flex items-center gap-2 text-[10px] text-gray-400">
-                                  <BookOpen size={12}/>
-                                  <span className="font-black uppercase tracking-widest">{session.topic}</span>
-                              </div>
-                              <div className="flex items-center gap-2 text-[10px] text-gray-400">
-                                  <Calendar size={12}/>
-                                  <span className="font-black uppercase tracking-widest">{session.startTime}</span>
-                              </div>
-                          </div>
-                      </div>
-                      <div className="mt-4">
-                        {getJoinButton(session)}
-                      </div>
-                      
-                      {session.status === 'live' && (
-                        <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-blue-500/10 rounded-full blur-[60px] pointer-events-none"></div>
+                      ) : (
+                          <button disabled className="w-full py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest bg-white/5 text-gray-600 cursor-not-allowed">
+                              ستبدأ قريباً
+                          </button>
                       )}
                   </div>
                 );
@@ -339,8 +240,8 @@ const LiveSessions: React.FC<LiveSessionsProps> = ({ user }) => {
               <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mx-auto mb-6">
                 <Video size={40} className="text-gray-600" />
               </div>
-              <p className="font-black text-lg uppercase tracking-widest mb-2">لا توجد حصص مباشرة متاحة لك حالياً</p>
-              <p className="text-sm text-gray-600 max-w-xs mx-auto">سيتم إخطارك فور بدء أي حصة جديدة تناسب صفك الدراسي.</p>
+              <p className="font-black text-lg uppercase tracking-widest mb-2">لا توجد حصص متاحة لصفك حالياً</p>
+              <p className="text-sm text-gray-600 max-w-xs mx-auto">تأكد من أنك مشترك في الصف الصحيح ({user.grade}) أو انتظر إشعاراً من المعلم.</p>
           </div>
         )}
       </div>

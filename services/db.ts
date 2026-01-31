@@ -626,7 +626,7 @@ class DBService {
       if(!db) return () => {};
       return db.collection('liveSessions').onSnapshot(snap => {
           const sessions = snap.docs.map(d => ({...d.data(), id: d.id} as LiveSession));
-          sessions.sort((a,b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
+          // Perform client-side sort
           callback(sessions);
       });
   }
