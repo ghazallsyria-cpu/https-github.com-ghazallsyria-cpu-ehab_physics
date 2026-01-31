@@ -1,0 +1,8 @@
+{
+  "name": "Copy of المركز السوري للعلوم",
+  "description": "منصة تعليم العلوم للمرحلة الثانوية - دولة الكويت.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
